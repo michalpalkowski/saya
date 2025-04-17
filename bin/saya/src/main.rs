@@ -12,8 +12,8 @@ use sovereign::Sovereign;
 mod persistent;
 use persistent::Persistent;
 
-mod sharding;
-use sharding::Sharding;
+pub mod sharding;
+pub use sharding::Sharding;
 
 mod any;
 

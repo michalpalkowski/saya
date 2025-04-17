@@ -26,33 +26,31 @@ const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct Sharding {
     /// Rollup network Starknet JSON-RPC URL (v0.7.1)
     #[clap(long, env)]
-    rollup_rpc: Url,
+    pub rollup_rpc: Url,
     /// Path to the compiled Starknet OS program
     #[clap(long, env)]
-    snos_program: PathBuf,
+    pub snos_program: PathBuf,
     /// Path to the database directory
     #[clap(long, env)]
-    db_dir: Option<PathBuf>,
+    pub db_dir: Option<PathBuf>,
     /// Atlantic prover API key
     #[clap(long, env)]
-    atlantic_key: String,
+    pub atlantic_key: String,
     /// Whether to mock the SNOS proof by extracting the output from the PIE and using it from a proof.
     #[clap(long)]
-    mock_snos_from_pie: bool,
+    pub mock_snos_from_pie: bool,
     /// Shard contract address
     #[clap(env, long)]
-    shard_contract_address: Felt,
+    pub shard_contract_address: Felt,
     #[clap(env, long)]
-    game_contract_address: Felt,
+    pub game_contract_address: Felt,
     #[clap(env, long)]
-    event_name: String,
+    pub event_name: String,
     #[clap(env, long)]
-    shard_id: u32,
-    #[clap(env, long)]
-    account_address: Felt,
+    pub account_address: Felt,
     /// Settlement network account private key
     #[clap(env, long)]
-    account_private_key: Felt,
+    pub account_private_key: Felt,
 }
 
 impl Sharding {
@@ -97,7 +95,7 @@ impl Sharding {
         );
 
         let aggregator_builder =
-            AggregatorMockBuilder::new(self.shard_id, account, self.shard_contract_address);
+            AggregatorMockBuilder::new(account, self.shard_contract_address);
 
         let orchestrator = ShardingOrchestratorBuilder::new(
             block_ingestor_builder,

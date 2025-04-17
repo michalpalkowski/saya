@@ -19,3 +19,11 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "
 url.workspace = true
 prover-sdk.workspace = true
 log.workspace = true
+
+[lib]
+name = "saya"
+path = "src/lib.rs"
+
+[[bin]]
+name = "saya"
+path = "src/main.rs"

@@ -105,7 +105,14 @@ impl ShardingOrchestratorState {
         loop {
             // TODO: handle unexpected exit of descendant services
             tokio::select! {
-                _ = self.finish_handle.shutdown_requested() => break,
+                _ = self.finish_handle.shutdown_requested() => {
+                    debug!("Finish handle shutdown requested, starting graceful shutdown");
+                    break;
+                }
+                _ = self.ingestor_handle.finished() => {
+                    debug!("Aggregator finished, starting graceful shutdown");
+                    break;
+                }
             };
         }
         // Request graceful shutdown for all descendant services

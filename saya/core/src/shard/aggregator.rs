@@ -14,19 +14,16 @@ use starknet_types_core::felt::Felt;
 use std::{collections::HashMap, sync::Arc};
 use swiftness::types::StarkProof;
 use tokio::sync::mpsc::Receiver;
-
-use crate::shard::shard_output::{CRDType, ContractChanges as ShardContractChanges, ShardOutput, StorageChange};
+use crate::shard::shard_output::{ContractChanges as ShardContractChanges, ShardOutput};
 use crate::{
     prover::SnosProof,
     service::{Daemon, FinishHandle},
     utils::calculate_output,
 };
-
 use super::{Aggregator, AggregatorBuilder};
 
 #[derive(Debug)]
 pub struct AggregatorMock {
-    shard_id: u32,
     proxy_contract_address: Felt,
     channel: Receiver<SnosProof<StarkProof>>,
     account: SingleOwnerAccount<Arc<JsonRpcClient<HttpTransport>>, LocalWallet>,
@@ -35,7 +32,6 @@ pub struct AggregatorMock {
 
 #[derive(Debug)]
 pub struct AggregatorMockBuilder {
-    shard_id: u32,
     proxy_contract_address: Felt,
     account: SingleOwnerAccount<Arc<JsonRpcClient<HttpTransport>>, LocalWallet>,
     channel: Option<Receiver<SnosProof<StarkProof>>>,
@@ -43,13 +39,11 @@ pub struct AggregatorMockBuilder {
 
 impl AggregatorMockBuilder {
     pub fn new(
-        shard_id: u32,
         account: SingleOwnerAccount<Arc<JsonRpcClient<HttpTransport>>, LocalWallet>,
         proxy_contract_address: Felt,
     ) -> Self {
         Self {
             channel: None,
-            shard_id,
             account,
             proxy_contract_address,
         }
@@ -79,7 +73,7 @@ impl AggregatorMock {
             squashing_result.state_diff = Some(squashed_diff);
         }
 
-        let mut shard_output = ShardOutput { state_diff: vec![] };
+        let mut shard_output = ShardOutput { state_diff: vec![], merkle_root: Felt::from_hex_unchecked("0x49451AEA6E9D63A04A5D1FE210188829CDCF3E9AF4489003518C62149324B7C") };
 
         for contract_change in squashing_result.state_diff.unwrap().contract_changes {
             shard_output.state_diff.push(ShardContractChanges {
@@ -89,14 +83,11 @@ impl AggregatorMock {
                 storage_changes: contract_change
                     .storage_changes
                     .iter()
-                    .map(|(k, v)| StorageChange {
-                        key: *k,
-                        value: *v,
-                        crd_type: CRDType::Add,
-                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
             });
         }
+        println!("shard_output: {:?}", shard_output);
 
         let calldata = ShardOutput::cairo_serialize(&shard_output);
         println!("Finished squashing proofs");
@@ -104,7 +95,6 @@ impl AggregatorMock {
             self.proxy_contract_address,
             calldata,
             self.account,
-            self.shard_id.into(),
         )
         .await;
         self.finish_handle.finish();
@@ -147,14 +137,12 @@ pub fn squash_classes(
 #[derive(Debug, Encode)]
 struct UpdateStateCalldata {
     snos_output: Vec<Felt>,
-    shard_id: Felt,
 }
 
 pub async fn send_transaction(
     contract_address: Felt,
     snos_output: Vec<Felt>,
     account: SingleOwnerAccount<Arc<JsonRpcClient<HttpTransport>>, LocalWallet>,
-    shard_id: Felt,
 ) {
     let selector = selector!("update_contract_state");
     let call = Call {
@@ -163,7 +151,6 @@ pub async fn send_transaction(
         calldata: {
             let calldata = UpdateStateCalldata {
                 snos_output,
-                shard_id,
             };
 
             let mut raw_calldata = vec![];
@@ -171,6 +158,7 @@ pub async fn send_transaction(
             raw_calldata
         },
     };
+    println!("calldata: {:?}", call);
     let tx = account
         .execute_v3(vec![call])
         .send()
@@ -190,7 +178,6 @@ impl AggregatorBuilder for AggregatorMockBuilder {
             channel: self
                 .channel
                 .ok_or_else(|| anyhow::anyhow!("channel is required"))?,
-            shard_id: self.shard_id,
             finish_handle: FinishHandle::new(),
         })
     }

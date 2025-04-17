@@ -41,7 +41,7 @@ pub struct ShardingIngestor<S, DB> {
     finish_handle: FinishHandle,
     db: DB,
     workers_count: usize,
-    proxy_contract_address: Felt,
+    contract_address: Felt,
     event_hash: Felt,
 }
 
@@ -53,7 +53,7 @@ pub struct ShardingIngestorBuilder<S, DB> {
     channel: Option<Sender<BlockInfo>>,
     db: DB,
     workers_count: usize,
-    proxy_contract_address: Felt,
+    contract_address: Felt,
     event_name: String,
 }
 
@@ -210,7 +210,7 @@ where
                             .unwrap();
                     }
                     let end_event_in_block = look_for_event(
-                        self.proxy_contract_address,
+                        self.contract_address,
                         self.current_block,
                         self.rpc_url.clone(),
                         self.event_hash,
@@ -247,7 +247,7 @@ impl<S, DB> ShardingIngestorBuilder<S, DB> {
         snos: S,
         db: DB,
         workers_count: usize,
-        proxy_contract_address: Felt,
+        contract_address: Felt,
         event_name: String,
     ) -> Self {
         Self {
@@ -257,7 +257,7 @@ impl<S, DB> ShardingIngestorBuilder<S, DB> {
             channel: None,
             db,
             workers_count,
-            proxy_contract_address,
+            contract_address,
             event_name,
         }
     }
@@ -283,7 +283,7 @@ where
             finish_handle: FinishHandle::new(),
             db: self.db,
             workers_count: self.workers_count,
-            proxy_contract_address: self.proxy_contract_address,
+            contract_address: self.contract_address,
             event_hash: starknet_keccak(self.event_name.as_bytes()),
         })
     }

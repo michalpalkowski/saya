@@ -1,13 +1,133 @@
+use std::{io::Read, path::PathBuf, sync::Arc, time::Duration};
+
 use anyhow::Result;
 use clap::Parser;
+use saya_core::{
+    block_ingestor::ShardingIngestorBuilder, orchestrator::ShardingOrchestratorBuilder,
+    prover::AtlanticSnosProverBuilder, service::Daemon, shard::AggregatorMockBuilder,
+    storage::SqliteDb,
+};
+use starknet::{
+    accounts::{Account, ExecutionEncoding, SingleOwnerAccount},
+    providers::{
+        jsonrpc::{HttpTransport, JsonRpcClient},
+        Provider,
+    },
+    signers::{LocalWallet, SigningKey},
+};
+use starknet_types_core::felt::Felt;
+use url::Url;
+
+use crate::common::SAYA_DB_PATH;
+
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Parser)]
-pub struct Sharding {}
+pub struct Sharding {
+    /// Rollup network Starknet JSON-RPC URL (v0.7.1)
+    #[clap(long, env)]
+    pub rollup_rpc: Url,
+    /// Mainnet network Starknet JSON-RPC URL (v0.7.1)
+    #[clap(long, env)]
+    pub mainnet_rpc: Url,
+    /// Path to the compiled Starknet OS program
+    #[clap(long, env)]
+    pub snos_program: PathBuf,
+    /// Path to the database directory
+    #[clap(long, env)]
+    pub db_dir: Option<PathBuf>,
+    /// Atlantic prover API key
+    #[clap(long, env)]
+    pub atlantic_key: String,
+    /// Whether to mock the SNOS proof by extracting the output from the PIE and using it from a proof.
+    #[clap(long)]
+    pub mock_snos_from_pie: bool,
+    /// Shard contract address
+    #[clap(env, long)]
+    pub shard_contract_address: Felt,
+    #[clap(env, long)]
+    pub game_contract_address: Felt,
+    #[clap(env, long)]
+    pub event_name: String,
+    #[clap(env, long)]
+    pub account_address: Felt,
+    /// Settlement network account private key
+    #[clap(env, long)]
+    pub account_private_key: Felt,
+}
 
 impl Sharding {
     pub async fn run(self) -> Result<()> {
-        Err(anyhow::anyhow!(
-            "sharding execution mode not yet implemented"
-        ))
+        let mut snos_file = std::fs::File::open(self.snos_program)?;
+        let mut snos = Vec::with_capacity(snos_file.metadata()?.len() as usize);
+        snos_file.read_to_end(&mut snos)?;
+
+        let saya_path = ":memory:";
+
+        let db = SqliteDb::new(&saya_path).await?;
+
+        let block_ingestor_builder = ShardingIngestorBuilder::new(
+            self.rollup_rpc.clone(),
+            snos,
+            db.clone(),
+            1,
+            self.game_contract_address,
+            self.event_name,
+        );
+
+        let snos_prover_builder = AtlanticSnosProverBuilder::new(
+            self.atlantic_key,
+            self.mock_snos_from_pie,
+            db.clone(),
+            1,
+        );
+
+        let provider: Arc<JsonRpcClient<HttpTransport>> = Arc::new(JsonRpcClient::new(
+            HttpTransport::new(self.mainnet_rpc.clone()),
+        ));
+        let chain_id = provider.chain_id().await?;
+        let signer =
+            LocalWallet::from_signing_key(SigningKey::from_secret_scalar(self.account_private_key));
+
+        let account = SingleOwnerAccount::new(
+            provider,
+            signer,
+            self.account_address,
+            chain_id,
+            ExecutionEncoding::New,
+        );
+
+        let aggregator_builder = AggregatorMockBuilder::new(account, self.shard_contract_address);
+
+        let orchestrator = ShardingOrchestratorBuilder::new(
+            block_ingestor_builder,
+            snos_prover_builder,
+            aggregator_builder,
+        )
+        .build()
+        .await?;
+
+        let orchestrator_shutdown = orchestrator.shutdown_handle();
+        orchestrator.start();
+
+        let mut sigterm_handle =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let ctrl_c_handle = tokio::signal::ctrl_c();
+
+        tokio::select! {
+            _ = sigterm_handle.recv() => {},
+            _ = ctrl_c_handle => {},
+            _ = orchestrator_shutdown.finished() => {},
+        }
+        orchestrator_shutdown.shutdown();
+
+        tokio::select! {
+            _ = tokio::time::sleep(GRACEFUL_SHUTDOWN_TIMEOUT) => {
+                Err(anyhow::anyhow!("timeout waiting for graceful shutdown"))
+            },
+            _ = orchestrator_shutdown.finished() => {
+                Ok(())
+            },
+        }
     }
 }

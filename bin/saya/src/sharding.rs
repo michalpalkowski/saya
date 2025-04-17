@@ -27,6 +27,9 @@ pub struct Sharding {
     /// Rollup network Starknet JSON-RPC URL (v0.7.1)
     #[clap(long, env)]
     pub rollup_rpc: Url,
+    /// Mainnet network Starknet JSON-RPC URL (v0.7.1)
+    #[clap(long, env)]
+    pub mainnet_rpc: Url,
     /// Path to the compiled Starknet OS program
     #[clap(long, env)]
     pub snos_program: PathBuf,
@@ -80,7 +83,7 @@ impl Sharding {
         );
 
         let provider: Arc<JsonRpcClient<HttpTransport>> = Arc::new(JsonRpcClient::new(
-            HttpTransport::new(self.rollup_rpc.clone()),
+            HttpTransport::new(self.mainnet_rpc.clone()),
         ));
         let chain_id = provider.chain_id().await?;
         let signer =
@@ -94,8 +97,7 @@ impl Sharding {
             ExecutionEncoding::New,
         );
 
-        let aggregator_builder =
-            AggregatorMockBuilder::new(account, self.shard_contract_address);
+        let aggregator_builder = AggregatorMockBuilder::new(account, self.shard_contract_address);
 
         let orchestrator = ShardingOrchestratorBuilder::new(
             block_ingestor_builder,

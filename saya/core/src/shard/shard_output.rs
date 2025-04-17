@@ -18,4 +18,3 @@ pub struct ShardOutput {
     pub state_diff: Vec<ContractChanges>,
     pub merkle_root: Felt252,
 }
-

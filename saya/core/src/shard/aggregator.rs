@@ -1,5 +1,15 @@
+use super::{Aggregator, AggregatorBuilder};
+use crate::shard::shard_output::{ContractChanges as ShardContractChanges, ShardOutput};
+use crate::{
+    prover::SnosProof,
+    service::{Daemon, FinishHandle},
+    utils::calculate_output,
+};
 use cainome_cairo_serde::CairoSerde;
+use starknet::accounts::single_owner::SignError;
+use starknet::accounts::AccountError;
 use starknet::core::codec::Encode;
+use starknet::signers::local_wallet::SignError as LocalWalletSignError;
 use starknet::{
     accounts::{Account, SingleOwnerAccount},
     core::types::Call,
@@ -13,14 +23,35 @@ use starknet_os::io::output::{
 use starknet_types_core::felt::Felt;
 use std::{collections::HashMap, sync::Arc};
 use swiftness::types::StarkProof;
+use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
-use crate::shard::shard_output::{ContractChanges as ShardContractChanges, ShardOutput};
-use crate::{
-    prover::SnosProof,
-    service::{Daemon, FinishHandle},
-    utils::calculate_output,
-};
-use super::{Aggregator, AggregatorBuilder};
+
+#[derive(Error, Debug)]
+pub enum AggregatorError {
+    #[error("Channel not initialized")]
+    ChannelNotInitialized,
+
+    #[error(transparent)]
+    DeserializationError(#[from] anyhow::Error),
+
+    #[error(transparent)]
+    TransactionError(#[from] starknet::core::types::StarknetError),
+
+    #[error(transparent)]
+    SnOsError(#[from] starknet_os::error::SnOsError),
+
+    #[error("State diff is missing")]
+    StateDiffMissing,
+
+    #[error(transparent)]
+    CodecError(#[from] starknet::core::codec::Error),
+
+    #[error(transparent)]
+    AccountError(#[from] AccountError<SignError<LocalWalletSignError>>),
+
+    #[error("Channel closed")]
+    ChannelClosed,
+}
 
 #[derive(Debug)]
 pub struct AggregatorMock {
@@ -51,31 +82,50 @@ impl AggregatorMockBuilder {
 }
 
 impl AggregatorMock {
-    pub async fn run(mut self) {
-        let first_block = self.channel.recv().await.unwrap();
-        println!("Received 1 proof: {:?}", first_block.block_number);
+    pub async fn run(mut self) -> Result<(), AggregatorError> {
+        let first_block = self
+            .channel
+            .recv()
+            .await
+            .ok_or(AggregatorError::ChannelClosed)?;
+        log::info!("Received 1 proof: {:?}", first_block.block_number);
         let proof_output = calculate_output(&first_block.proof);
         let mut output_iter = proof_output.iter().copied();
         output_iter.nth(2); // Skip the first 3 elements as they are bootloader related
 
-        let mut squashing_result: StarknetOsOutput =
-            deserialize_os_output(&mut output_iter).unwrap();
+        let mut squashing_result: StarknetOsOutput = deserialize_os_output(&mut output_iter)?;
         while let Some(proof) = self.channel.recv().await {
-            println!("Received proof: {:?}", proof.block_number);
+            log::info!("Received proof: {:?}", proof.block_number);
             let proof_output = calculate_output(&proof.proof);
             let mut output_iter = proof_output.iter().copied();
             output_iter.nth(2); // Skip the first 3 elements as they are bootloader related
-            let os_output: StarknetOsOutput = deserialize_os_output(&mut output_iter).unwrap();
-            let state_diff = os_output.state_diff.unwrap();
+            let os_output: StarknetOsOutput = deserialize_os_output(&mut output_iter)?;
+            let state_diff = os_output
+                .state_diff
+                .ok_or(AggregatorError::StateDiffMissing)?;
 
-            let squashed_diff =
-                squash_state_diff(squashing_result.state_diff.clone().unwrap(), state_diff);
+            let squashed_diff = squash_state_diff(
+                squashing_result
+                    .state_diff
+                    .clone()
+                    .ok_or(AggregatorError::StateDiffMissing)?,
+                state_diff,
+            );
             squashing_result.state_diff = Some(squashed_diff);
         }
 
-        let mut shard_output = ShardOutput { state_diff: vec![], merkle_root: Felt::from_hex_unchecked("0x49451AEA6E9D63A04A5D1FE210188829CDCF3E9AF4489003518C62149324B7C") };
+        let mut shard_output = ShardOutput {
+            state_diff: vec![],
+            merkle_root: Felt::from_hex_unchecked(
+                "0x49451AEA6E9D63A04A5D1FE210188829CDCF3E9AF4489003518C62149324B7C",
+            ),
+        };
 
-        for contract_change in squashing_result.state_diff.unwrap().contract_changes {
+        for contract_change in squashing_result
+            .state_diff
+            .ok_or(AggregatorError::StateDiffMissing)?
+            .contract_changes
+        {
             shard_output.state_diff.push(ShardContractChanges {
                 addr: contract_change.addr,
                 nonce: contract_change.nonce,
@@ -87,17 +137,12 @@ impl AggregatorMock {
                     .collect(),
             });
         }
-        println!("shard_output: {:?}", shard_output);
 
         let calldata = ShardOutput::cairo_serialize(&shard_output);
-        println!("Finished squashing proofs");
-        send_transaction(
-            self.proxy_contract_address,
-            calldata,
-            self.account,
-        )
-        .await;
+        log::info!("Finished squashing proofs");
+        send_transaction(self.proxy_contract_address, calldata, self.account).await?;
         self.finish_handle.finish();
+        Ok(())
     }
 }
 
@@ -143,41 +188,37 @@ pub async fn send_transaction(
     contract_address: Felt,
     snos_output: Vec<Felt>,
     account: SingleOwnerAccount<Arc<JsonRpcClient<HttpTransport>>, LocalWallet>,
-) {
+) -> Result<Felt, AggregatorError> {
     let selector = selector!("update_contract_state");
     let call = Call {
         to: contract_address,
         selector,
         calldata: {
-            let calldata = UpdateStateCalldata {
-                snos_output,
-            };
+            let calldata = UpdateStateCalldata { snos_output };
 
             let mut raw_calldata = vec![];
-            calldata.encode(&mut raw_calldata).unwrap();
+            calldata.encode(&mut raw_calldata)?;
             raw_calldata
         },
     };
-    println!("calldata: {:?}", call);
+    log::debug!("calldata: {:?}", call);
     let tx = account
         .execute_v3(vec![call])
         .send()
-        .await
-        .unwrap()
+        .await?
         .transaction_hash;
-    println!("{}", tx);
+    log::info!("Transaction hash: {}", tx);
+    Ok(tx)
 }
 
 impl AggregatorBuilder for AggregatorMockBuilder {
     type Aggregator = AggregatorMock;
 
-    fn build(self) -> anyhow::Result<Self::Aggregator> {
+    fn build(self) -> Result<Self::Aggregator, AggregatorError> {
         Ok(AggregatorMock {
             proxy_contract_address: self.proxy_contract_address,
             account: self.account,
-            channel: self
-                .channel
-                .ok_or_else(|| anyhow::anyhow!("channel is required"))?,
+            channel: self.channel.ok_or(AggregatorError::ChannelNotInitialized)?,
             finish_handle: FinishHandle::new(),
         })
     }
